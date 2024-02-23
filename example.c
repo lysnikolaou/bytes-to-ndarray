@@ -104,7 +104,7 @@ static PyObject *example_bytesarray(PyObject *self, PyObject *args)
 
         while (count--) {
             memcpy(data, buffer[i], sizes[i]);
-            memset(buffer + sizes[i], 0, descr->elsize - sizes[i]);
+            memset(data + sizes[i], 0, descr->elsize - sizes[i]);
             i++;
             data += stride;
         }
