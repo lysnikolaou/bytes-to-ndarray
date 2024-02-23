@@ -9,4 +9,4 @@ python3 -m pip install numpy meson meson-python
 meson setup build
 meson compile -C build
 PYTHONPATH=$PWD/build python createarray.py
-``
+```

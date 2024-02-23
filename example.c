@@ -18,16 +18,16 @@ static PyObject *example_bytesarray(PyObject *self, PyObject *args)
     PyObject *res = NULL;
     PyObject *o;
 
-    /* This parses the Python argument into a double */
     if(!PyArg_ParseTuple(args, "O", &o)) {
         return NULL;
     }
 
     if (!PyList_Check(o)) {
-        PyErr_SetString(PyExc_ValueError, "strarray only accepts a list of bytes");
+        PyErr_SetString(PyExc_ValueError, "bytesarray only accepts a list of bytes");
         return NULL;
     }
 
+    // Allocate buffer. Call calloc so that memory gets initialized to 0.
     Py_ssize_t size = PyList_Size(o);
     char **buffer = PyMem_Calloc(size, sizeof(char *));
     if (!buffer) {
@@ -35,11 +35,12 @@ static PyObject *example_bytesarray(PyObject *self, PyObject *args)
         return NULL;
     }
 
+    // Allocate space for the sizes. We need these for copying over
+    // from buffer to the array later.
     Py_ssize_t *sizes = PyMem_Malloc(size * sizeof(Py_ssize_t));
     if (!sizes) {
         PyErr_NoMemory();
-        PyMem_Free(buffer);
-        return NULL;
+        goto fail_after_buffer;
     }
 
     Py_ssize_t maxitemsize = 0;
@@ -47,9 +48,10 @@ static PyObject *example_bytesarray(PyObject *self, PyObject *args)
         PyObject *item = PyList_GetItem(o, i);
         if (!PyBytes_CheckExact(item)) {
             PyErr_SetString(PyExc_ValueError, "strarray only accepts a list of bytes");
-            goto fail;
+            goto fail_after_sizes;
         }
 
+        // Find maxsize. Needed for setting the dtype's elsize.
         Py_ssize_t itemsize = PyBytes_Size(item);
         sizes[i] = itemsize;
         if (itemsize > maxitemsize) {
@@ -59,7 +61,7 @@ static PyObject *example_bytesarray(PyObject *self, PyObject *args)
         buffer[i] = PyMem_Malloc((itemsize + 1) * sizeof(char));
         if (!buffer[i]) {
             PyErr_NoMemory();
-            goto fail;
+            goto fail_after_sizes;
         }
 
         char *item_as_string = PyBytes_AsString(item);
@@ -68,43 +70,49 @@ static PyObject *example_bytesarray(PyObject *self, PyObject *args)
 
     PyArray_Descr *descr = PyArray_DescrFromType(NPY_STRING);
     if (descr == NULL) {
-        goto fail;
+        goto fail_after_sizes;
     }
-    descr->elsize = maxitemsize;
+    descr->elsize = maxitemsize; // Set buffer size for array items
 
     Py_INCREF(descr);
     PyArrayObject *arr = (PyArrayObject *) PyArray_SimpleNewFromDescr(1, &size, descr);
     if (arr == NULL) {
-        Py_DECREF(descr);
-        goto fail;
+        goto fail_after_descr;
     }
 
+    // Create array iterator
     NpyIter *iter = NpyIter_New(arr, NPY_ITER_WRITEONLY | NPY_ITER_EXTERNAL_LOOP | NPY_ITER_REFS_OK,
         NPY_KEEPORDER, NPY_NO_CASTING, NULL);
     if (!iter) {
-        Py_DECREF(descr);
-        goto fail;
+        goto fail_after_descr;
     }
 
+    // Save iterator's next() for more efficient calling in the while-loop
     NpyIter_IterNextFunc *iternext = NpyIter_GetIterNext(iter, NULL);
     if (!iternext) {
-        Py_DECREF(descr);
-        NpyIter_Deallocate(iter);
-        goto fail;
+        goto fail_after_iter;
     }
 
+    // Get pointers to data, strides and inner loop size
     char **dataptr = NpyIter_GetDataPtrArray(iter);
     npy_intp *strideptr = NpyIter_GetInnerStrideArray(iter);
     npy_intp *innersizeptr = NpyIter_GetInnerLoopSizePtr(iter);
+
     Py_ssize_t i = 0;
     do {
-        char *data = *dataptr;
-        npy_intp stride = *strideptr;
+        char *data = *dataptr;  // Data buffer
+        npy_intp stride = *strideptr;  // Strides
+
+        // Inner loop size (needed because of NPY_ITER_EXTERNAL_LOOP above)
         npy_intp count = *innersizeptr;
 
         while (count--) {
             memcpy(data, buffer[i], sizes[i]);
+
+            // For elements where len(buffer[i]) < elsize, we need to set the
+            // remaining bytes to 0.
             memset(data + sizes[i], 0, descr->elsize - sizes[i]);
+
             i++;
             data += stride;
         }
@@ -112,11 +120,16 @@ static PyObject *example_bytesarray(PyObject *self, PyObject *args)
     } while (iternext(iter));
 
 
-    Py_DECREF(descr);
-    NpyIter_Deallocate(iter);
     res = (PyObject *) arr;
 
-fail:
+    // Clean everything up
+fail_after_iter:
+    NpyIter_Deallocate(iter);
+fail_after_descr:
+    Py_DECREF(descr);
+fail_after_sizes:
+    PyMem_Free(sizes);
+fail_after_buffer:
     for (Py_ssize_t i = 0; i < size; i++) {
         if (!buffer[i]) {
             break;
@@ -124,7 +137,6 @@ fail:
         PyMem_Free(buffer[i]);
     }
     PyMem_Free(buffer);
-    PyMem_Free(sizes);
     return res;
 }
 
